@@ -26,3 +26,5 @@ docker run --rm \
 ```
 
 本仓库只维护套件源码和 Docker 镜像。`.slsp` 套件交付包由 `seclab-suites` 仓库统一维护和发布。
+
+在 SecLab 内运行时，后端通过 Suite Runtime SDK 使用 `operation-logs.write` 能力记录 PCAP 上传、解析终态、删除和构建操作。Agent 实例令牌不会暴露给前端。

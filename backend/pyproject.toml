@@ -5,6 +5,7 @@ description = "PCAP Analysis & Packet Builder"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+  "seclab-suite-runtime-sdk @ git+https://github.com/seclab-dev/seclab-suite-runtime-sdk.git@python-0.1.0-alpha.1#subdirectory=packages/python",
   "fastapi>=0.138.1",
   "pydantic-settings>=2.14.2",
   "python-multipart>=0.0.32",

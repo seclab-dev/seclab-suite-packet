@@ -8,6 +8,7 @@ from scapy.layers.http import HTTPRequest
 from scapy.layers.inet import IP, TCP
 from scapy.layers.l2 import ARP, Ether
 from scapy.utils import wrpcap
+from starlette.requests import Request
 
 from app.api.builders import build_pcap
 from app.core.config import settings
@@ -250,7 +251,8 @@ def test_build_pcap_records_parent_before_packet_summaries(tmp_path, monkeypatch
     )
 
     try:
-        response = build_pcap(request, db)
+        http_request = Request({"type": "http", "headers": []})
+        response = build_pcap(request, http_request, db)
 
         assert response["pcap_id"]
         assert (

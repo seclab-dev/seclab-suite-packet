@@ -2,7 +2,15 @@ import uuid
 from pathlib import Path
 from typing import List
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    HTTPException,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -11,6 +19,12 @@ from app.db.session import get_db
 from app.models.models import PcapFile
 from app.schemas.schemas import PcapFileResponse
 from app.services.pcap_parser import parse_pcap_task
+from app.services.operation_audit import emit, pcap_event
+from seclab_suite_runtime import (
+    OperationImpact,
+    OperationOutcome,
+    operation_context_from_headers,
+)
 
 router = APIRouter()
 
@@ -38,10 +52,12 @@ def _validate_pcap_extension(filename: str) -> str:
 
 @router.post("", response_model=PcapFileResponse)
 def upload_pcap(
+    request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
+    operation_context_id = operation_context_from_headers(request.headers)
     filename = _safe_original_filename(file.filename)
     extension = _validate_pcap_extension(filename)
 
@@ -67,9 +83,35 @@ def upload_pcap(
                 f.write(chunk)
     except HTTPException:
         file_path.unlink(missing_ok=True)
+        emit(
+            pcap_event(
+                "pcap_upload_submitted",
+                "提交流量文件",
+                "Submit traffic file",
+                pcap_id,
+                OperationOutcome.FAILURE,
+                OperationImpact.ERROR,
+                operation_context_id=operation_context_id,
+                error_code="PCAP_UPLOAD_REJECTED",
+                error_summary="PCAP upload was rejected",
+            )
+        )
         raise
     except Exception as e:
         file_path.unlink(missing_ok=True)
+        emit(
+            pcap_event(
+                "pcap_upload_submitted",
+                "提交流量文件",
+                "Submit traffic file",
+                pcap_id,
+                OperationOutcome.FAILURE,
+                OperationImpact.ERROR,
+                operation_context_id=operation_context_id,
+                error_code="PCAP_UPLOAD_FAILED",
+                error_summary="PCAP upload failed",
+            )
+        )
         raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
 
     # 写入数据库记录
@@ -85,8 +127,22 @@ def upload_pcap(
     db.commit()
     db.refresh(pcap_record)
 
+    emit(
+        pcap_event(
+            "pcap_upload_submitted",
+            "提交流量文件",
+            "Submit traffic file",
+            pcap_id,
+            OperationOutcome.SUCCESS,
+            OperationImpact.INFO,
+            operation_context_id=operation_context_id,
+        )
+    )
+
     # 开启后台任务解析 PCAP
-    background_tasks.add_task(parse_pcap_task, pcap_id, str(file_path))
+    background_tasks.add_task(
+        parse_pcap_task, pcap_id, str(file_path), operation_context_id
+    )
 
     return pcap_record
 
@@ -102,7 +158,8 @@ def get_pcap_info(pcap_id: str, db: Session = Depends(get_db)):
 
 
 @router.delete("/{pcap_id}")
-def delete_pcap(pcap_id: str, db: Session = Depends(get_db)):
+def delete_pcap(pcap_id: str, request: Request, db: Session = Depends(get_db)):
+    operation_context_id = operation_context_from_headers(request.headers)
     pcap_record = _get_pcap_or_404(pcap_id, db)
 
     # 删除磁盘文件
@@ -110,6 +167,17 @@ def delete_pcap(pcap_id: str, db: Session = Depends(get_db)):
 
     db.delete(pcap_record)
     db.commit()
+    emit(
+        pcap_event(
+            "pcap_deleted",
+            "删除流量文件",
+            "Delete traffic file",
+            pcap_id,
+            OperationOutcome.SUCCESS,
+            OperationImpact.WARNING,
+            operation_context_id=operation_context_id,
+        )
+    )
     return {"message": "PCAP file and analysis results deleted successfully"}
 
 

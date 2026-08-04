@@ -13,6 +13,8 @@ from app.db.session import SessionLocal
 from app.models.models import PcapFile, PacketSummary
 from app.services.packet_utils import get_tcp_application_payload_len
 from app.services.protocol_decode import detect_application_protocol
+from app.services.operation_audit import emit, pcap_event
+from seclab_suite_runtime import OperationImpact, OperationOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +94,9 @@ def packet_to_summary_dict(index: int, pkt: Any) -> dict:
     return item
 
 
-def parse_pcap_task(pcap_id: str, file_path: str):
+def parse_pcap_task(
+    pcap_id: str, file_path: str, operation_context_id: str | None = None
+):
     """
     后台执行的 PCAP 解析任务。
     自己开启独立的数据库 Session 避免多线程并发冲突。
@@ -207,6 +211,18 @@ def parse_pcap_task(pcap_id: str, file_path: str):
         pcap_file.packet_count = count
         db.commit()
         logger.info(f"Finished parsing PCAP: {pcap_id}. Total packets parsed: {count}")
+        emit(
+            pcap_event(
+                "pcap_parse_succeeded",
+                "流量解析完成",
+                "Traffic parsing completed",
+                pcap_id,
+                OperationOutcome.SUCCESS,
+                OperationImpact.INFO,
+                operation_context_id=operation_context_id,
+                packet_count=count,
+            )
+        )
 
     except Exception as e:
         logger.exception(f"Error parsing PCAP: {e}")
@@ -216,5 +232,18 @@ def parse_pcap_task(pcap_id: str, file_path: str):
             pcap_file.status = "failed"
             pcap_file.error_message = str(e)
             db.commit()
+        emit(
+            pcap_event(
+                "pcap_parse_failed",
+                "流量解析失败",
+                "Traffic parsing failed",
+                pcap_id,
+                OperationOutcome.FAILURE,
+                OperationImpact.ERROR,
+                operation_context_id=operation_context_id,
+                error_code="PCAP_PARSE_FAILED",
+                error_summary="PCAP parsing failed",
+            )
+        )
     finally:
         db.close()

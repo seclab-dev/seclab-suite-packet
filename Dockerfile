@@ -14,7 +14,11 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 # 拷贝后端依赖并同步
 COPY backend/pyproject.toml backend/uv.lock ./
-RUN uv sync --frozen --no-cache
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && uv sync --frozen --no-cache \
+    && apt-get purge -y --auto-remove git \
+    && rm -rf /var/lib/apt/lists/*
 
 # 拷贝后端代码（把 app 目录和 main.py 拷贝到工作区）
 COPY backend/main.py ./

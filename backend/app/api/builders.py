@@ -1,7 +1,7 @@
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from scapy.utils import wrpcap
 
@@ -18,6 +18,12 @@ from app.schemas.schemas import (
 from app.services.packet_builder import build_packet_from_spec, get_builder_schema
 from app.services.packet_detail import packet_to_detail
 from app.services.pcap_parser import packet_to_summary_dict
+from app.services.operation_audit import emit, pcap_event
+from seclab_suite_runtime import (
+    OperationImpact,
+    OperationOutcome,
+    operation_context_from_headers,
+)
 
 router = APIRouter()
 
@@ -68,7 +74,10 @@ def preview_packet(request: PacketPreviewRequest):
 
 
 @router.post("/pcaps/build", response_model=PcapBuildResponse)
-def build_pcap(request: PcapBuildRequest, db: Session = Depends(get_db)):
+def build_pcap(
+    request: PcapBuildRequest, http_request: Request, db: Session = Depends(get_db)
+):
+    operation_context_id = operation_context_from_headers(http_request.headers)
     if not request.packets:
         raise HTTPException(status_code=400, detail="Packet list cannot be empty")
     if len(request.packets) > settings.MAX_BUILD_PACKET_COUNT:
@@ -89,10 +98,12 @@ def build_pcap(request: PcapBuildRequest, db: Session = Depends(get_db)):
             pkt = build_packet_from_spec(spec.model_dump())
             scapy_packets.append(pkt)
     except ValueError as ve:
+        emit_build_failure(pcap_id, "PCAP_BUILD_INVALID", operation_context_id)
         raise HTTPException(
             status_code=400, detail=f"Validation error in packet definition: {str(ve)}"
         )
     except Exception as e:
+        emit_build_failure(pcap_id, "PCAP_BUILD_FAILED", operation_context_id)
         raise HTTPException(
             status_code=500, detail=f"Failed to compile packets: {str(e)}"
         )
@@ -101,6 +112,7 @@ def build_pcap(request: PcapBuildRequest, db: Session = Depends(get_db)):
     try:
         wrpcap(str(file_path), scapy_packets)
     except Exception as e:
+        emit_build_failure(pcap_id, "PCAP_WRITE_FAILED", operation_context_id)
         raise HTTPException(
             status_code=500, detail=f"Failed to write PCAP file to disk: {str(e)}"
         )
@@ -136,8 +148,40 @@ def build_pcap(request: PcapBuildRequest, db: Session = Depends(get_db)):
         db.rollback()
         # 如果数据库出错，清理掉磁盘上的临时文件
         file_path.unlink(missing_ok=True)
+        emit_build_failure(pcap_id, "PCAP_RECORD_FAILED", operation_context_id)
         raise HTTPException(
             status_code=500, detail=f"Failed to record built PCAP in database: {str(e)}"
         )
 
+    emit(
+        pcap_event(
+            "pcap_built",
+            "构建流量文件",
+            "Build traffic file",
+            pcap_id,
+            OperationOutcome.SUCCESS,
+            OperationImpact.INFO,
+            operation_context_id=operation_context_id,
+            packet_count=len(scapy_packets),
+        )
+    )
+
     return {"pcap_id": pcap_id, "download_url": f"/api/pcaps/{pcap_id}/download"}
+
+
+def emit_build_failure(
+    pcap_id: str, error_code: str, operation_context_id: str | None
+) -> None:
+    emit(
+        pcap_event(
+            "pcap_built",
+            "构建流量文件",
+            "Build traffic file",
+            pcap_id,
+            OperationOutcome.FAILURE,
+            OperationImpact.ERROR,
+            operation_context_id=operation_context_id,
+            error_code=error_code,
+            error_summary="PCAP build failed",
+        )
+    )
